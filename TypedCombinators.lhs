@@ -1,3 +1,11 @@
+---
+title: "Compiling to Intrinsically Typed Combinators"
+---
+
+XXX goal: compile to host language
+
+First, some language extensions and imports.
+
 > {-# LANGUAGE GADTs #-}
 > {-# LANGUAGE KindSignatures #-}
 > {-# LANGUAGE DataKinds #-}
@@ -12,47 +20,78 @@
 > import Data.Text ( Text )
 > import Data.Kind (Type)
 > import Data.Type.Equality ( type (:~:)(Refl), TestEquality(..) )
->
-> ------------------------------------------------------------
-> -- Untyped terms
->
+
+Untyped, raw terms
+------------------
+
+Here's an algebraic data type to represent raw terms of our language.
+I've put in just enough features to make it nontrivial, but there's
+not much: we have integer literals, variables, lambdas, application, `let`, `if`,
+addition, and comparison with `>`.  Of course, it would be easy to add
+more base types and constants.
+
 > data Term where
 >   Lit :: Int -> Term
 >   Var :: Text -> Term
+>   Lam :: Text -> Ty -> Term -> Term
+>   App :: Term -> Term -> Term
 >   Let :: Text -> Term -> Term -> Term
 >   If  :: Term -> Term -> Term -> Term
 >   Add :: Term -> Term -> Term
 >   Gt  :: Term -> Term -> Term
 >   deriving Show
->
-> ------------------------------------------------------------
-> -- Type class for type-indexed application
->
-> infixl 1 $$
-> class Applicable t where
->   ($$) :: t (a -> b) -> t a -> t b
->
-> ------------------------------------------------------------
-> -- Type-indexed constants
->
-> -- Includes language built-ins as well as combinators we will use
-> -- later as a compilation target.
+
+In order to keep things simple, notice that lambdas must be annotated
+with the type of the argument. XXX say something later about extending
+to situation with generating constraints, unification.
+
+Here are our types: integers, booleans, and functions.
+
+> data Ty where
+>   TyInt  :: Ty
+>   TyBool :: Ty
+>   TyFun  :: Ty -> Ty -> Ty
+>   deriving Show
+
+Type-indexed constants
+----------------------
+
+That was the end of our raw, untyped representations --- from now on,
+everything is going to be type-indexed!  First of all, we'll declare
+an enumeration of constants, with each constant indexed by its
+corresponding host language type.  These will include both any special
+language built-ins (like `if`, addition, *etc.*) as well as a set of
+combinators which we'll be using as a compilation target.  We have the
+usual SKI combinators as well as `B` and `C`, which are like special-case
+variants of `S`:
+
+* `S x y z = x z (y z)`
+* `B x y z = x   (y z)`
+* `C x y z = x z (y  )`
+
+`S` handles the application of `x` to `y` in the case where they both
+need access to a shared parameter `z`; `B` and `C` are similar, but
+`B` is used when only `y`, and not `x`, needs access to `z`, and `C`
+is for when only `x` needs access to `z`.  Using `B` and `C` will
+allow for more efficient encodings than would be possible with `S`
+alone.
+
 > data Const :: Type -> Type where
 >   CInt :: Int -> Const Int
 >   CIf :: Const (Bool -> a -> a -> a)
 >   CAdd :: Const (Int -> Int -> Int)
 >   CGt :: Ord a => Const (a -> a -> Bool)
+>   I :: Const (a -> a)
 >   K :: Const (a -> b -> a)
 >   S :: Const ((a -> b -> c) -> (a -> b) -> a -> c)
->   I :: Const (a -> a)
->   B :: Const ((b -> c) -> (a -> b) -> a -> c)
->   C :: Const ((a -> b -> c) -> b -> a -> c)
+>   B :: Const ((     b -> c) -> (a -> b) -> a -> c)
+>   C :: Const ((a -> b -> c) ->       b  -> a -> c)
 >
 > deriving instance Show (Const ty)
->
-> -- Interpret constants directly into the host language.  We don't use
-> -- this in our ultimate compilation but it's nice to have for
-> -- debugging/comparison.
+
+Just for fun/debugging, it's easy to interpret constants directly into
+the host language, although we're not actually going to use this.
+
 > interpConst :: Const ty -> ty
 > interpConst = \case
 >   (CInt i) -> i
@@ -64,25 +103,49 @@
 >   I -> id
 >   B -> (.)
 >   C -> flip
->
+
+For convenience, we make a type class `HasConst` for type-indexed
+things that can contain embedded constants (we will end up with
+several of them).
+
 > class HasConst t where
->   injConst :: Const a -> t a
->
+>   embed :: Const a -> t a
+
+Also for convenience, here's a type class for type-indexed things that
+support some kind of application operation. (We don't necessarily want
+to require `t` to support a `pure :: a -> t a` operation, or even be a
+`Functor`, so using `Applicative` would not be appropriate.)
+
+> infixl 1 $$
+> class Applicable t where
+>   ($$) :: t (a -> b) -> t a -> t b
+
+Note that, unlike Haskell's `$` operator, `$$` is *left*-associative,
+so, for example, `f $$ x $$ y` should be read just like `f x y`.
+
+Finally, we'll spend a bunch of time applying constants to things, or
+applying things to constants, so here are a few convenience operators
+for combining application `$$` and `embed`:
+
 > infixl 1 .$
 > (.$) :: (HasConst t, Applicable t) => Const (a -> b) -> t a -> t b
-> c .$ t = injConst c $$ t
+> c .$ t = embed c $$ t
 >
 > infixl 1 $.
 > ($.) :: (HasConst t, Applicable t) => t (a -> b) -> Const a -> t b
-> t $. c = t $$ injConst c
+> t $. c = t $$ embed c
 >
 > infixl 1 .$.
 > (.$.) :: (HasConst t, Applicable t) => Const (a -> b) -> Const a -> t b
-> c1 .$. c2 = injConst c1 $$ injConst c2
->
-> ------------------------------------------------------------
-> -- Intrinsically typed terms
->
+> c1 .$. c2 = embed c1 $$ embed c2
+
+
+Type-indexed types and terms
+----------------------------
+
+Now let's build up our type-indexed core language.  Note we're not
+just making a type-indexed version of our original 
+
 > -- Typed de Bruijn indices.
 > data Idx :: [Type] -> Type -> Type where
 >   VZ :: Idx (ty ': g) ty
@@ -104,28 +167,39 @@
 >   ($$) = TApp
 >
 > instance HasConst (TTerm g) where
->   injConst = TConst
+>   embed = TConst
 >
 > ------------------------------------------------------------
 > -- Type representations
 >
 > -- DSL types, indexed by their host language counterparts.
 > data TType :: Type -> Type where
->   TyInt :: TType Int
->   TyBool :: TType Bool
+>   TTyInt :: TType Int
+>   TTyBool :: TType Bool
+>   (:->:) :: TType a -> TType b -> TType (a -> b)
 >
 > deriving instance Show (TType ty)
+>
+> data SomeType :: Type where
+>   SomeType :: TType ty -> SomeType
+>
+> someType :: Ty -> SomeType
+> someType TyInt = SomeType TTyInt
+> someType TyBool = SomeType TTyBool
+> someType (TyFun ty1 ty2) = case (someType ty1, someType ty2) of
+>   (SomeType ty1', SomeType ty2') -> SomeType (ty1' :->: ty2')
 >
 > -- Utilities
 >
 > instance TestEquality TType where
->   testEquality TyInt TyInt = Just Refl
->   testEquality TyBool TyBool = Just Refl
+>   testEquality TTyInt TTyInt = Just Refl
+>   testEquality TTyBool TTyBool = Just Refl
 >   testEquality _ _ = Nothing
 >
 > checkOrd :: TType ty -> (Ord ty => a) -> Maybe a
-> checkOrd TyInt a = Just a
-> checkOrd TyBool a = Just a
+> checkOrd TTyInt a = Just a
+> checkOrd TTyBool a = Just a
+> checkOrd _ _ = Nothing
 >
 > ------------------------------------------------------------
 > -- Type checking/inference
@@ -154,29 +228,41 @@
 > -- We simultaneously typecheck and elaborate to our typed core language.
 >
 > infer :: Ctx g -> Term -> Maybe (SomeTerm g)
-> infer _ (Lit i) = return $ SomeTerm TyInt (TConst (CInt i))
+> infer _ (Lit i) = return $ SomeTerm TTyInt (TConst (CInt i))
 > infer ctx (Var x) = (\(SomeIdx i ty) -> SomeTerm ty (TVar i)) <$> lookup x ctx
+> infer ctx (Lam x ty1 t) = do
+>   case someType ty1 of
+>     SomeType ty1' -> do
+>       SomeTerm ty2 t' <- infer (CCons x ty1' ctx) t
+>       return $ SomeTerm (ty1' :->: ty2) (TLam t')
+> infer ctx (App t1 t2) = do
+>   SomeTerm ty1 t1' <- infer ctx t1
+>   case ty1 of
+>     tyArg :->: tyRes -> do
+>       t2' <- check ctx t2 tyArg
+>       return $ SomeTerm tyRes (TApp t1' t2')
+>     _ -> Nothing
 > infer ctx (Let x t1 t2) = do
 >   SomeTerm ty1 t1' <- infer ctx t1
 >   SomeTerm ty2 t2' <- infer (CCons x ty1 ctx) t2
 >   return $ SomeTerm ty2 (TApp (TLam t2') t1')
 > infer ctx (If t1 t2 t3) = do
->   t1' <- check ctx t1 TyBool
+>   t1' <- check ctx t1 TTyBool
 >   SomeTerm ty2 t2' <- infer ctx t2
 >   SomeTerm ty3 t3' <- infer ctx t3
 >   case testEquality ty2 ty3 of
 >     Nothing -> Nothing
 >     Just Refl -> return $ SomeTerm ty2 (CIf .$ t1' $$ t2' $$ t3')
 > infer ctx (Add t1 t2) = do
->   t1' <- check ctx t1 TyInt
->   t2' <- check ctx t2 TyInt
->   return $ SomeTerm TyInt (CAdd .$ t1' $$ t2')
+>   t1' <- check ctx t1 TTyInt
+>   t2' <- check ctx t2 TTyInt
+>   return $ SomeTerm TTyInt (CAdd .$ t1' $$ t2')
 > infer ctx (Gt t1 t2) = do
 >   SomeTerm ty1 t1' <- infer ctx t1
 >   SomeTerm ty2 t2' <- infer ctx t2
 >   case testEquality ty1 ty2 of
 >     Nothing -> Nothing
->     Just Refl -> (\c -> SomeTerm TyBool (c .$ t1' $$ t2')) <$> checkOrd ty1 CGt
+>     Just Refl -> (\c -> SomeTerm TTyBool (c .$ t1' $$ t2')) <$> checkOrd ty1 CGt
 >
 > check :: Ctx g -> Term -> TType ty -> Maybe (TTerm g ty)
 > check ctx t ty = do
@@ -237,7 +323,7 @@
 >   ($$) = BApp
 >
 > instance HasConst BTerm where
->   injConst = BConst
+>   embed = BConst
 >
 > --------------------------------------------------
 > -- Open terms
@@ -255,7 +341,7 @@
 >   OW :: OTerm g b -> OTerm (a ': g) b
 >
 > instance HasConst (OTerm g) where
->   injConst = OC . injConst
+>   embed = OC . embed
 >
 > -- Bracket abstraction: convert the TTerm to an OTerm, then project
 > -- out the embedded BTerm.  GHC can see this is total since OC is the
@@ -276,7 +362,7 @@
 >   ON e -> e
 >   OW e -> K .$ e
 > conv (TApp t1 t2) = conv t1 $$ conv t2
-> conv (TConst c) = injConst c
+> conv (TConst c) = embed c
 >
 > instance Applicable (OTerm g) where
 >   OW e1 $$ OW e2 = OW (e1 $$ e2)
