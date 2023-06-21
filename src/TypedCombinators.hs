@@ -54,15 +54,16 @@ deriving instance Show (Const ty)
 -- this in our ultimate compilation but it's nice to have for
 -- debugging/comparison.
 interpConst :: Const ty -> ty
-interpConst (CInt i) = i
-interpConst CIf = \b t e -> if b then t else e
-interpConst CAdd = (+)
-interpConst CGt = (>)
-interpConst K = const
-interpConst S = (<*>)
-interpConst I = id
-interpConst B = (.)
-interpConst C = flip
+interpConst = \case
+  (CInt i) -> i
+  CIf -> \b t e -> if b then t else e
+  CAdd -> (+)
+  CGt -> (>)
+  K -> const
+  S -> (<*>)
+  I -> id
+  B -> (.)
+  C -> flip
 
 class HasConst t where
   injConst :: Const a -> t a
