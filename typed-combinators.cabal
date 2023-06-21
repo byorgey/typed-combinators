@@ -1,17 +1,22 @@
 cabal-version:      3.0
 name:               typed-combinators
 version:            0.1.0.0
--- synopsis:
+synopsis:           Intrinsically typed, combinator-based implementation of a functional language
 -- description:
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             Brent Yorgey
 maintainer:         byorgey@gmail.com
--- copyright:
+copyright:          Brent Yorgey 2023
 category:           Language
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
--- extra-source-files:
+
+tested-with:        GHC ==9.6.1
+
+source-repository head
+  type:     git
+  location: git://github.com/byorgey/typed-combinators.git
 
 common warnings
     ghc-options: -Wall
@@ -19,8 +24,5 @@ common warnings
 library
     import:           warnings
     exposed-modules:  TypedCombinators
-    -- other-modules:
-    -- other-extensions:
     build-depends:    base ^>=4.18.0.0, text
-    hs-source-dirs:   src
     default-language: Haskell2010
