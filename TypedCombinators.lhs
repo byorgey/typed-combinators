@@ -61,20 +61,8 @@ everything is going to be type-indexed!  First of all, we'll declare
 an enumeration of constants, with each constant indexed by its
 corresponding host language type.  These will include both any special
 language built-ins (like `if`, addition, *etc.*) as well as a set of
-combinators which we'll be using as a compilation target.  We have the
-usual SKI combinators as well as `B` and `C`, which are like special-case
-variants of `S`:
-
-* `S x y z = x z (y z)`
-* `B x y z = x   (y z)`
-* `C x y z = x z (y  )`
-
-`S` handles the application of `x` to `y` in the case where they both
-need access to a shared parameter `z`; `B` and `C` are similar, but
-`B` is used when only `y`, and not `x`, needs access to `z`, and `C`
-is for when only `x` needs access to `z`.  Using `B` and `C` will
-allow for more efficient encodings than would be possible with `S`
-alone.
+combinators which we'll be using as a compilation target (more on
+these later).
 
 > data Const :: Type -> Type where
 >   CInt :: Int -> Const Int
@@ -89,8 +77,9 @@ alone.
 >
 > deriving instance Show (Const ty)
 
-Just for fun/debugging, it's easy to interpret constants directly into
-the host language, although we're not actually going to use this.
+Just for fun and/or debugging, it's easy to interpret constants
+directly into the host language, although we're not actually going to
+use this.
 
 > interpConst :: Const ty -> ty
 > interpConst = \case
@@ -112,16 +101,18 @@ several of them).
 >   embed :: Const a -> t a
 
 Also for convenience, here's a type class for type-indexed things that
-support some kind of application operation. (We don't necessarily want
-to require `t` to support a `pure :: a -> t a` operation, or even be a
-`Functor`, so using `Applicative` would not be appropriate.)
+support some kind of application operation. (Note that we don't
+necessarily want to require `t` to support a `pure :: a -> t a`
+operation, or even be a `Functor`, so using `Applicative` would not be
+appropriate.)
 
 > infixl 1 $$
 > class Applicable t where
 >   ($$) :: t (a -> b) -> t a -> t b
 
 Note that, unlike Haskell's `$` operator, `$$` is *left*-associative,
-so, for example, `f $$ x $$ y` should be read just like `f x y`.
+so, for example, `f $$ x $$ y` should be read just like `f x y`, that
+is, `f $$ x $$ y = (f $$ x) $$ y`.
 
 Finally, we'll spend a bunch of time applying constants to things, or
 applying things to constants, so here are a few convenience operators
@@ -144,22 +135,35 @@ Type-indexed types and terms
 ----------------------------
 
 Now let's build up our type-indexed core language.  Note we're not
-just making a type-indexed version of our original 
+just making a type-indexed version of our original term language; for
+simplicity, we're going to simultaneously typecheck and elaborate down
+to a simpler core language.  Of course, it would also be entirely
+possible to introduce another intermediate data type for type-indexed
+terms and separate the typechecking and elaboration phases.
 
-> -- Typed de Bruijn indices.
+First, a data type for type-indexed de Bruijn indices.  A value of
+type `Idx g ty` is a variable with type `ty` in the context `g`
+(represented as a type-level list of types).  For example, `Idx
+[Int,Bool,Int] Int` would be a variable of type `Int` (and hence must
+either be variable 0 or 2).
+
 > data Idx :: [Type] -> Type -> Type where
 >   VZ :: Idx (ty ': g) ty
 >   VS :: Idx g ty -> Idx (ty2 ': g) ty
 >
 > deriving instance Show (Idx g ty)
->
-> -- Type-indexed terms.  Note this is a stripped-down core language,
-> -- with only variables, lambdas, application, and constants.
+
+Now we can build our type-indexed terms.  Just like variables, terms
+are indexed by a typing context and a type; `t : TTerm g ty` can be
+read as "in context `g`, `t` is a term with type `ty`".  Our core
+language has only variables, constants, lambdas, application, and
+constants.
+
 > data TTerm :: [Type] -> Type -> Type where
 >   TVar :: Idx g t -> TTerm g t
+>   TConst :: Const a -> TTerm g a
 >   TLam :: TTerm (ty1 ': g) ty2 -> TTerm g (ty1 -> ty2)
 >   TApp :: TTerm g (a -> b) -> TTerm g a -> TTerm g b
->   TConst :: Const a -> TTerm g a
 >
 > deriving instance Show (TTerm g ty)
 >
@@ -168,7 +172,9 @@ just making a type-indexed version of our original
 >
 > instance HasConst (TTerm g) where
 >   embed = TConst
->
+
+
+
 > ------------------------------------------------------------
 > -- Type representations
 >
@@ -302,6 +308,23 @@ just making a type-indexed version of our original
 > --   http://okmij.org/ftp/tagless-final/ski.pdf
 > --   http://okmij.org/ftp/tagless-final/skconv.ml
 >
+
+  We have the
+usual SKI combinators as well as `B` and `C`, which are like special-case
+variants of `S`:
+
+* `S x y z = x z (y z)`
+* `B x y z = x   (y z)`
+* `C x y z = x z (y  )`
+
+`S` handles the application of `x` to `y` in the case where they both
+need access to a shared parameter `z`; `B` and `C` are similar, but
+`B` is used when only `y`, and not `x`, needs access to `z`, and `C`
+is for when only `x` needs access to `z`.  Using `B` and `C` will
+allow for more efficient encodings than would be possible with `S`
+alone.
+
+
 > --------------------------------------------------
 > -- Closed terms
 >
