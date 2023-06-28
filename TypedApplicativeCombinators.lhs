@@ -480,9 +480,10 @@ alone.
 >
 > runCTerm :: CTerm a -> a
 > runCTerm (CConst a) = a
->   -- Above might not be sufficient if we can actually have functions in our language.
->   -- Can only use runCTerm at a non-function type.
->
+> runCTerm (CFun f) = runCTerm . f . CConst
+
+------------------------------------------------------------
+-- Example stuff
 
 > ex :: Term
 > ex = If (Gt X (Lit 3)) (Add (Lit 2) X) (Lit 5)
