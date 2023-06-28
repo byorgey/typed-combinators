@@ -173,7 +173,8 @@ constants.
 > deriving instance Show (TTerm g ty)
 >
 > instance Applicable (TTerm g) where
->   ($$) = TApp
+>   TConst I $$ x = x
+>   f $$ x = TApp f x
 >
 > instance HasConst (TTerm g) where
 >   embed = TConst
@@ -305,7 +306,8 @@ constants.
 >
 > check :: Ctx g -> Term -> TType ty -> Maybe (TTerm g ty)
 > check ctx t ty = do
->   SomeTerm ty' t' <- infer ctx t
+>   t1 <- infer ctx t
+>   SomeTerm ty' t' <- apply (SomeTerm (ty :->: ty) (embed I)) t1
 >   case testEquality ty ty' of
 >     Nothing -> Nothing
 >     Just Refl -> Just t'
