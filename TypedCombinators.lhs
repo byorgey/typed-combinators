@@ -4,15 +4,18 @@ title: "Compiling to Intrinsically Typed Combinators"
 
 XXX goal: compile to host language
 
+XXX talk about `Maybe`
+
 First, some language extensions and imports.
 
-> {-# LANGUAGE GADTs #-}
-> {-# LANGUAGE KindSignatures #-}
 > {-# LANGUAGE DataKinds #-}
-> {-# LANGUAGE TypeOperators #-}
+> {-# LANGUAGE GADTs #-}
+> {-# LANGUAGE InstanceSigs #-}
+> {-# LANGUAGE KindSignatures #-}
+> {-# LANGUAGE LambdaCase #-}
 > {-# LANGUAGE RankNTypes #-}
 > {-# LANGUAGE StandaloneDeriving #-}
-> {-# LANGUAGE LambdaCase #-}
+> {-# LANGUAGE TypeOperators #-}
 >
 > module TypedCombinators where
 >
@@ -24,7 +27,7 @@ First, some language extensions and imports.
 Untyped, raw terms
 ------------------
 
-Here's an algebraic data type to represent raw terms of our language.
+Here's an algebraic data type to represent raw terms of our DSL.
 I've put in just enough features to make it nontrivial, but there's
 not much: we have integer literals, variables, lambdas, application, `let`, `if`,
 addition, and comparison with `>`.  Of course, it would be easy to add
@@ -62,7 +65,7 @@ an enumeration of constants, with each constant indexed by its
 corresponding host language type.  These will include both any special
 language built-ins (like `if`, addition, *etc.*) as well as a set of
 combinators which we'll be using as a compilation target (more on
-these later).
+these later).  XXX say more about CIf, CGt polymorphism
 
 > data Const :: Type -> Type where
 >   CInt :: Int -> Const Int
@@ -155,9 +158,9 @@ either be variable 0 or 2).
 
 Now we can build our type-indexed terms.  Just like variables, terms
 are indexed by a typing context and a type; `t : TTerm g ty` can be
-read as "in context `g`, `t` is a term with type `ty`".  Our core
-language has only variables, constants, lambdas, application, and
-constants.
+read as "`t` is a term with type `ty`, possibly containing variables
+whose types are described by the context `g`".  Our core language has
+only variables, constants, lambdas, and application.
 
 > data TTerm :: [Type] -> Type -> Type where
 >   TVar :: Idx g t -> TTerm g t
@@ -173,19 +176,24 @@ constants.
 > instance HasConst (TTerm g) where
 >   embed = TConst
 
+Now for some type-indexed types!  That is, we have a term-level
+representation of our DSL's types, indexed by the corresponding host
+language types. XXX singletons etc., connection between term + type
+levels.  XXX Pattern-matching on `TType` values lets us learn type information.
 
-
-> ------------------------------------------------------------
-> -- Type representations
->
-> -- DSL types, indexed by their host language counterparts.
 > data TType :: Type -> Type where
 >   TTyInt :: TType Int
 >   TTyBool :: TType Bool
 >   (:->:) :: TType a -> TType b -> TType (a -> b)
 >
 > deriving instance Show (TType ty)
->
+
+Occasionally we will need one of these type-indexed types inside an
+existential wrapper; in particular when converting from a `Ty` we
+can't know which type we're going to get.  `SomeType` wraps up a
+`TType` with a hidden type index, and the `someType` function converts
+from `Ty` to `SomeType`.
+
 > data SomeType :: Type where
 >   SomeType :: TType ty -> SomeType
 >
@@ -194,53 +202,121 @@ constants.
 > someType TyBool = SomeType TTyBool
 > someType (TyFun ty1 ty2) = case (someType ty1, someType ty2) of
 >   (SomeType ty1', SomeType ty2') -> SomeType (ty1' :->: ty2')
->
-> -- Utilities
->
+
+Finally, a few type-related utilities.  First, we will need to be able
+to test two value-level type representations for equality and have
+that reflected at the level of type indices; the `TestEquality` class
+from `Data.Type.Equality` is perfect for this.  The `testEquality`
+function takes two type-indexed things and returns a type equality
+proof wrapped in `Maybe`.
+
 > instance TestEquality TType where
+>   testEquality :: TType a -> TType b -> Maybe (a :~: b)
 >   testEquality TTyInt TTyInt = Just Refl
 >   testEquality TTyBool TTyBool = Just Refl
+>   testEquality (ty11 :->: ty12) (ty21 :->: ty22) =
+>     case (testEquality ty11 ty21, testEquality ty12 ty22) of
+>       (Just Refl, Just Refl) -> Just Refl
+>       _ -> Nothing
 >   testEquality _ _ = Nothing
->
+
+Recall that the `CGt` constant requires an `Ord` instance; the
+`checkOrd` function pattern-matches on a `TType` and witnesses the
+fact that the corresponding host-language type has an `Ord` instance
+(if, in fact, it does).
+
 > checkOrd :: TType ty -> (Ord ty => a) -> Maybe a
 > checkOrd TTyInt a = Just a
 > checkOrd TTyBool a = Just a
 > checkOrd _ _ = Nothing
->
-> ------------------------------------------------------------
-> -- Type checking/inference
->
+
+Type inference and elaboration
+------------------------------
+
+Now that we have our type-indexed core language all set, it's time to
+translate from untyped terms (`Term`) to type-indexed ones!  First,
+let's define type contexts, *i.e.* mappings from variables to their
+types.  We store contexts simply as a (fancy, type-indexed) list of
+variable names paired with their types.
+
 > data Ctx :: [Type] -> Type where
->   CNil :: Ctx '[]
->   CCons :: Text -> TType ty -> Ctx g -> Ctx (ty ': g)
 >
+>   -- CNil represents an empty context.
+>   CNil :: Ctx '[]
+>
+>   -- A cons stores a variable name and its type, and then the rest of the context.
+>   (:::) :: (Text, TType ty) -> Ctx g -> Ctx (ty ': g)
+
+When looking up a variable name in the context, we can't know in
+advance what index we will get and what type it will have.  But since
+that information is reflected at the type level, we will have to wrap
+it in an existential.  `SomeIdx g` represents an existentially wrapped
+index into the context `g`.  However, we also package up a `TType`
+with the type of the variable---pattern-matching on this `TType` value
+will allow us to recover the type information.
+
 > data SomeIdx :: [Type] -> Type where
->   SomeIdx :: Idx g ty -> TType ty -> SomeIdx g
+>   SomeIdx :: TType ty -> Idx g ty -> SomeIdx g
 >
 > mapSomeIdx :: (forall ty. Idx g1 ty -> Idx g2 ty) -> SomeIdx g1 -> SomeIdx g2
-> mapSomeIdx f (SomeIdx i ty) = SomeIdx (f i) ty
->
+> mapSomeIdx f (SomeIdx ty i) = SomeIdx ty (f i)
+
+Now we can define the `lookup` function, which takes a variable name
+and a context and tries to return a corresponding de Bruijn index into
+the context.
+
 > lookup :: Text -> Ctx g -> Maybe (SomeIdx g)
 > lookup _ CNil = Nothing
-> lookup x (CCons y ty ctx)
->   | x == y = Just (SomeIdx VZ ty)
+> lookup x ((y, ty) ::: ctx)
+>   | x == y = Just (SomeIdx ty VZ)
 >   | otherwise = mapSomeIdx VS <$> lookup x ctx
->
+
+Just as with variable lookups, when inferring the type of a term we
+can't know in advance what type it will have, so we will need to
+return an existential wrapper around a type-indexed term.  `SomeTerm`
+packages up a type-indexed term along with a corresponding `TType`
+value.
+
 > data SomeTerm :: [Type] -> Type where
 >   SomeTerm :: TType ty -> TTerm g ty -> SomeTerm g
 >
 > deriving instance Show (SomeTerm g)
->
-> -- We simultaneously typecheck and elaborate to our typed core language.
->
+
+Now we're finally ready to define the `infer` function!  It takes a
+type context and a raw term, and tries to compute a corresponding
+type-indexed term.  XXX no guarantee that we return corresponding one,
+but at least the Haskell type system guarantees that we can't return a
+type-incorrect term!
+
 > infer :: Ctx g -> Term -> Maybe (SomeTerm g)
-> infer _ (Lit i) = return $ SomeTerm TTyInt (TConst (CInt i))
-> infer ctx (Var x) = (\(SomeIdx i ty) -> SomeTerm ty (TVar i)) <$> lookup x ctx
+
+To infer the type of a literal integer value, just return `TTyInt`
+with a literal integer constant.
+
+> infer _ (Lit i) = return $ SomeTerm TTyInt (embed (CInt i))
+
+To infer the type of a variable, look it up in the context and wrap
+the result in `TVar`.  Notice how we are allowed to pattern-match on
+`SomeIdx` (revealing the existentially quantified type inside) since
+we immediately wrap it back up inside `SomeTerm`.
+
+> infer ctx (Var x) = (\(SomeIdx ty i) -> SomeTerm ty (TVar i)) <$> lookup x ctx
+
+To infer the type of a lambda, we convert the argument type annotation
+to a type-indexed type, infer the type of the body under an extended
+context, and then return a lambda with an appropriate function type.
+
 > infer ctx (Lam x ty1 t) = do
 >   case someType ty1 of
 >     SomeType ty1' -> do
->       SomeTerm ty2 t' <- infer (CCons x ty1' ctx) t
+>       SomeTerm ty2 t' <- infer ((x,ty1') ::: ctx) t
 >       return $ SomeTerm (ty1' :->: ty2) (TLam t')
+
+To infer the type of an application, we infer the type of the
+left-hand side, ensure it is a function type, and `check` that the
+right-hand side has the correct type.  We will see the `check`
+function later.
+
 > infer ctx (App t1 t2) = do
 >   SomeTerm ty1 t1' <- infer ctx t1
 >   case ty1 of
@@ -248,10 +324,19 @@ constants.
 >       t2' <- check ctx t2 tyArg
 >       return $ SomeTerm tyRes (TApp t1' t2')
 >     _ -> Nothing
+
+To infer the type of a `let`-expression, we infer the type of the
+definition, infer the type of the body under an extended context, and
+then desugar it into an application of a lambda.  That is, `let x = t1
+in t2` desugars to `(\x.t2) t1`.
+
 > infer ctx (Let x t1 t2) = do
 >   SomeTerm ty1 t1' <- infer ctx t1
->   SomeTerm ty2 t2' <- infer (CCons x ty1 ctx) t2
+>   SomeTerm ty2 t2' <- infer ((x, ty1) ::: ctx) t2
 >   return $ SomeTerm ty2 (TApp (TLam t2') t1')
+
+XXX if
+
 > infer ctx (If t1 t2 t3) = do
 >   t1' <- check ctx t1 TTyBool
 >   SomeTerm ty2 t2' <- infer ctx t2
@@ -259,17 +344,25 @@ constants.
 >   case testEquality ty2 ty3 of
 >     Nothing -> Nothing
 >     Just Refl -> return $ SomeTerm ty2 (CIf .$ t1' $$ t2' $$ t3')
+
+XXX add
+
 > infer ctx (Add t1 t2) = do
 >   t1' <- check ctx t1 TTyInt
 >   t2' <- check ctx t2 TTyInt
 >   return $ SomeTerm TTyInt (CAdd .$ t1' $$ t2')
+
+XXX Gt.  Note use of `checkOrd`.
+
 > infer ctx (Gt t1 t2) = do
 >   SomeTerm ty1 t1' <- infer ctx t1
 >   SomeTerm ty2 t2' <- infer ctx t2
 >   case testEquality ty1 ty2 of
 >     Nothing -> Nothing
 >     Just Refl -> (\c -> SomeTerm TTyBool (c .$ t1' $$ t2')) <$> checkOrd ty1 CGt
->
+
+XXX finally, the `check` function.  
+
 > check :: Ctx g -> Term -> TType ty -> Maybe (TTerm g ty)
 > check ctx t ty = do
 >   SomeTerm ty' t' <- infer ctx t
@@ -282,11 +375,11 @@ constants.
 >
 > data Env :: [Type] -> Type where
 >   ENil :: Env '[]
->   (:::) :: Env g -> a -> Env (a ': g)
+>   ECons :: a -> Env g -> Env (a ': g)
 >
 > (!) :: Env g -> Idx g ty -> ty
-> (_ ::: x) ! VZ = x
-> (e ::: _) ! (VS x) = e ! x
+> (ECons x _) ! VZ = x
+> (ECons _ e) ! (VS x) = e ! x
 > ENil ! _ = error "Impossible!"  -- for some reason GHC can't see that this case is impossible
 >
 > -- An interpreter, just for comparison.
@@ -295,7 +388,7 @@ constants.
 >   where
 >     go :: Env g -> TTerm g ty -> ty
 >     go e (TVar x) = e ! x
->     go e (TLam body) = \x -> go (e ::: x) body
+>     go e (TLam body) = \x -> go (ECons x e) body
 >     go e (TApp f x) = go e f (go e x)
 >     go _ (TConst c) = interpConst c
 >
