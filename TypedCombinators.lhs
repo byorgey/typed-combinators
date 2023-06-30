@@ -2,7 +2,7 @@
 title: "Compiling to Intrinsically Typed Combinators"
 ---
 
-XXX goal: compile to host language
+XXX goal: compile to host language.  Link to related things.
 
 XXX talk about `Maybe`
 
@@ -45,8 +45,10 @@ more base types and constants.
 >   deriving Show
 
 In order to keep things simple, notice that lambdas must be annotated
-with the type of the argument. XXX say something later about extending
-to situation with generating constraints, unification.
+with the type of the argument. XXX If chosen because it is
+polymorphic.  XXX Gt chosen because it is sort-of polymorphic!  XXX
+say something later about extending to situation with generating
+constraints, unification.
 
 Here are our types: integers, booleans, and functions.
 
@@ -79,22 +81,6 @@ these later).  XXX say more about CIf, CGt polymorphism
 >   C :: Const ((a -> b -> c) ->       b  -> a -> c)
 >
 > deriving instance Show (Const ty)
-
-Just for fun and/or debugging, it's easy to interpret constants
-directly into the host language, although we're not actually going to
-use this.
-
-> interpConst :: Const ty -> ty
-> interpConst = \case
->   (CInt i) -> i
->   CIf -> \b t e -> if b then t else e
->   CAdd -> (+)
->   CGt -> (>)
->   K -> const
->   S -> (<*>)
->   I -> id
->   B -> (.)
->   C -> flip
 
 For convenience, we make a type class `HasConst` for type-indexed
 things that can contain embedded constants (we will end up with
@@ -335,7 +321,10 @@ in t2` desugars to `(\x.t2) t1`.
 >   SomeTerm ty2 t2' <- infer ((x, ty1) ::: ctx) t2
 >   return $ SomeTerm ty2 (TApp (TLam t2') t1')
 
-XXX if
+To infer an `if`-expression, we can check that the test has type
+`Bool`, infer the types of the two branches, and ensure that they are
+the same.  If so, we return the `CIf` constant applied to the three
+arguments.
 
 > infer ctx (If t1 t2 t3) = do
 >   t1' <- check ctx t1 TTyBool
@@ -345,14 +334,18 @@ XXX if
 >     Nothing -> Nothing
 >     Just Refl -> return $ SomeTerm ty2 (CIf .$ t1' $$ t2' $$ t3')
 
-XXX add
+Addition is simple; we just check that both arguments have type `Int`.
 
 > infer ctx (Add t1 t2) = do
 >   t1' <- check ctx t1 TTyInt
 >   t2' <- check ctx t2 TTyInt
 >   return $ SomeTerm TTyInt (CAdd .$ t1' $$ t2')
 
-XXX Gt.  Note use of `checkOrd`.
+"Greater than" is a bit interesting because we allow it to be used at
+both `Int` and `Bool`.  So, just as with `if`, we must infer the types
+of the arguments and check that they match.  But then we must also use
+the `checkOrd` function to ensure that the argument types are an
+instance of `Ord`.
 
 > infer ctx (Gt t1 t2) = do
 >   SomeTerm ty1 t1' <- infer ctx t1
@@ -361,7 +354,12 @@ XXX Gt.  Note use of `checkOrd`.
 >     Nothing -> Nothing
 >     Just Refl -> (\c -> SomeTerm TTyBool (c .$ t1' $$ t2')) <$> checkOrd ty1 CGt
 
-XXX finally, the `check` function.  
+Finally, here's the `check` function: to check that an expression has
+a given type, infer its type and make sure it's the one we expected.
+Notice how this also allow us to return the type-indexed term without
+using an existential wrapper, since the expected type is an input.
+XXX in a real system this could be more interesting, *e.g.* nontrivial
+checking cases for lambdas, pairs, etc.  Leave as an exercise.
 
 > check :: Ctx g -> Term -> TType ty -> Maybe (TTerm g ty)
 > check ctx t ty = do
@@ -369,10 +367,23 @@ XXX finally, the `check` function.
 >   case testEquality ty ty' of
 >     Nothing -> Nothing
 >     Just Refl -> Just t'
->
-> ------------------------------------------------------------
-> -- Interpreting intrinsically typed terms
->
+
+An aside: a typed interpreter
+-----------------------------
+
+We can now easily write an interpreter.  However, this
+is pretty inefficient (it has to carry around an environment and do
+linear-time lookups), and later we're going to compile our terms
+directly to host language terms.  So this interpreter is just a nice
+aside, for fun and testing.
+
+With that said, given a closed term, we can interpret it directly to a
+value of its corresponding host language type.  We need typed
+environments and a indexing function (note that for some reason GHC
+can't see that the last case of the indexing function is impossible;
+if we tried implementing it in, say, Agda, we wouldn't have to write
+that case).
+
 > data Env :: [Type] -> Type where
 >   ENil :: Env '[]
 >   ECons :: a -> Env g -> Env (a ': g)
@@ -380,9 +391,10 @@ XXX finally, the `check` function.
 > (!) :: Env g -> Idx g ty -> ty
 > (ECons x _) ! VZ = x
 > (ECons _ e) ! (VS x) = e ! x
-> ENil ! _ = error "Impossible!"  -- for some reason GHC can't see that this case is impossible
->
-> -- An interpreter, just for comparison.
+> ENil ! _ = error "GHC can't tell this is impossible"
+
+Now the interpreter is straightforward.
+
 > interpTTerm :: TTerm '[] ty -> ty
 > interpTTerm = go ENil
 >   where
@@ -392,19 +404,59 @@ XXX finally, the `check` function.
 >     go e (TApp f x) = go e f (go e x)
 >     go _ (TConst c) = interpConst c
 >
-> ------------------------------------------------------------
-> -- Compiling to combinators
->
-> -- Explicitly type-preserving bracket abstraction, a la Oleg Kiselyov.
-> -- See:
-> --
-> --   http://okmij.org/ftp/tagless-final/ski.pdf
-> --   http://okmij.org/ftp/tagless-final/skconv.ml
->
+> interpConst :: Const ty -> ty
+> interpConst = \case
+>   (CInt i) -> i
+>   CIf -> \b t e -> if b then t else e
+>   CAdd -> (+)
+>   CGt -> (>)
+>   K -> const
+>   S -> (<*>)
+>   I -> id
+>   B -> (.)
+>   C -> flip
 
-  We have the
-usual SKI combinators as well as `B` and `C`, which are like special-case
-variants of `S`:
+Compiling to combinators: type-indexed bracket abstraction
+----------------------------------------------------------
+
+XXX Now, on with the main attraction!  It's well-known that certain
+sets of combinators are Turing-complete: XXX for example SKI most
+well-known (or SK if you're trying to be minimal).  Well-known
+algorithms for compiling lambda calculus terms into combinators, XXX
+*bracket abstraction*.  For example, the lambda calculus term `\x. x`
+can be represented by the combinator `I`; `\x. \y. x` can be
+represented by `K`; and XXX by XXX.
+
+XXX whole point is that by making environments implicit, we make use
+of the host language runtime's ability to keep track of environments.
+Much more efficient.
+
+So the idea is to compile our typed core language down to combinators.
+The resulting terms will have *no* lambdas or variables---only
+constants and application!  The `BTerm` type below will be the
+compilation target.  Again for illustration and/or debugging we can
+easily write a direct interpreter for `BTerm`---but this still isn't
+the intended code path.  There will still be one more step to convert
+`BTerm`s directly into host language terms.
+
+> data BTerm :: Type -> Type where
+>   BApp :: BTerm (a -> b) -> BTerm a -> BTerm b
+>   BConst :: Const a -> BTerm a
+>
+> deriving instance Show (BTerm ty)
+>
+> instance Applicable BTerm where
+>   ($$) = BApp
+>
+> instance HasConst BTerm where
+>   embed = BConst
+>
+> interpBTerm :: BTerm ty -> ty
+> interpBTerm (BApp f x) = interpBTerm f (interpBTerm x)
+> interpBTerm (BConst c) = interpConst c
+
+We will use the usual SKI combinators as well as `B` and `C`, which
+are like special-case variants of `S`:
 
 * `S x y z = x z (y z)`
 * `B x y z = x   (y z)`
@@ -417,30 +469,19 @@ is for when only `x` needs access to `z`.  Using `B` and `C` will
 allow for more efficient encodings than would be possible with `S`
 alone.
 
+If you want to compile a language with recursion you can also add the
+usual `Y` combinator, although we won't use it.  XXX This set of
+combinators is cheekily referred to as `SICKBY`.
 
-> --------------------------------------------------
-> -- Closed terms
->
-> -- Closed, fully abstracted terms.  All computation is represented by
-> -- combinators.  This is the target for the bracket abstraction
-> -- operation.
-> data BTerm :: Type -> Type where
->   BApp :: BTerm (a -> b) -> BTerm a -> BTerm b
->   BConst :: Const a -> BTerm a
->
-> -- Direct interpreter for BTerm, for debugging/comparison.
-> interpBTerm :: BTerm ty -> ty
-> interpBTerm (BApp f x) = interpBTerm f (interpBTerm x)
-> interpBTerm (BConst c) = interpConst c
->
-> deriving instance Show (BTerm t)
->
-> instance Applicable BTerm where
->   ($$) = BApp
->
-> instance HasConst BTerm where
->   embed = BConst
->
+XXX bracket abstraction usually presented in an untyped way.  e.g. see
+XXX.  But I found this [really cool paper by Oleg
+Kiselyov](http://okmij.org/ftp/tagless-final/ski.pdf) where he shows
+how to do bracket abstraction in a completely compositional,
+type-indexed way.  I found the paper a bit hard to understand, but
+fortunately it came with [working OCaml
+code](http://okmij.org/ftp/tagless-final/skconv.ml)!  Translating it
+to Haskell was straightforward.
+
 > --------------------------------------------------
 > -- Open terms
 >
@@ -448,56 +489,56 @@ alone.
 > -- bracket abstraction algorithm.
 > data OTerm :: [Type] -> Type -> Type where
 >   -- Embedded closed term.
->   OC :: BTerm a -> OTerm g a
+>   E :: BTerm a -> OTerm g a
 >   -- Reference to the innermost/top environment variable, i.e. Z
->   OV :: OTerm (a ': g) a
+>   V :: OTerm (a ': g) a
 >   -- Internalize the topmost env variable as a function argument
->   ON :: OTerm g (a -> b) -> OTerm (a ': g) b
+>   N :: OTerm g (a -> b) -> OTerm (a ': g) b
 >   -- Ignore the topmost env variable
->   OW :: OTerm g b -> OTerm (a ': g) b
+>   W :: OTerm g b -> OTerm (a ': g) b
 >
 > instance HasConst (OTerm g) where
->   embed = OC . embed
+>   embed = E . embed
 >
 > -- Bracket abstraction: convert the TTerm to an OTerm, then project
-> -- out the embedded BTerm.  GHC can see this is total since OC is the
+> -- out the embedded BTerm.  GHC can see this is total since E is the
 > -- only constructor that can produce an OTerm with an empty
 > -- environment.
 > bracket :: TTerm '[] a -> BTerm a
 > bracket t = case conv t of
->   OC t' -> t'
+>   E t' -> t'
 >
 > -- Type-preserving conversion from TTerm to OTerm (conv + the
 > -- Applicable instance).  Taken directly from Kiselyov.
 > conv :: TTerm g a -> OTerm g a
-> conv (TVar VZ) = OV
-> conv (TVar (VS x)) = OW (conv (TVar x))
+> conv (TVar VZ) = V
+> conv (TVar (VS x)) = W (conv (TVar x))
 > conv (TLam t) = case conv t of
->   OV -> OC (BConst I)
->   OC d -> OC (K .$ d)
->   ON e -> e
->   OW e -> K .$ e
+>   V -> E (embed I)
+>   E d -> E (K .$ d)
+>   N e -> e
+>   W e -> K .$ e
 > conv (TApp t1 t2) = conv t1 $$ conv t2
 > conv (TConst c) = embed c
 >
 > instance Applicable (OTerm g) where
->   OW e1 $$ OW e2 = OW (e1 $$ e2)
->   OW e $$ OC d = OW (e $$ OC d)
->   OC d $$ OW e = OW (OC d $$ e)
->   OW e $$ OV = ON e
->   OV $$ OW e = ON (OC (C .$. I) $$ e)
->   OW e1 $$ ON e2 = ON (B .$ e1 $$ e2)
->   ON e1 $$ OW e2 = ON (C .$ e1 $$ e2)
->   ON e1 $$ ON e2 = ON (S .$ e1 $$ e2)
->   ON e $$ OV = ON (S .$ e $. I)
->   OV $$ ON e = ON (OC (S .$. I) $$ e)
->   OC d $$ ON e = ON (OC (B .$ d) $$ e)
->   OC d $$ OV = ON (OC d)
->   OV $$ OC d = ON (OC (C .$. I $$ d))
->   ON e $$ OC d = ON (OC (C .$. C $$ d) $$ e)
->   OC d1 $$ OC d2 = OC (d1 $$ d2)
+>   W e1 $$ W e2 = W (e1 $$ e2)
+>   W e $$ E d = W (e $$ E d)
+>   E d $$ W e = W (E d $$ e)
+>   W e $$ V = N e
+>   V $$ W e = N (E (C .$. I) $$ e)
+>   W e1 $$ N e2 = N (B .$ e1 $$ e2)
+>   N e1 $$ W e2 = N (C .$ e1 $$ e2)
+>   N e1 $$ N e2 = N (S .$ e1 $$ e2)
+>   N e $$ V = N (S .$ e $. I)
+>   V $$ N e = N (E (S .$. I) $$ e)
+>   E d $$ N e = N (E (B .$ d) $$ e)
+>   E d $$ V = N (E d)
+>   V $$ E d = N (E (C .$. I $$ d))
+>   N e $$ E d = N (E (C .$. C $$ d) $$ e)
+>   E d1 $$ E d2 = E (d1 $$ d2)
 >
->   -- GHC can tell that OV $$ OV is impossible (it would be ill-typed)
+>   -- GHC can tell that V $$ V is impossible (it would be ill-typed)
 >
 > ------------------------------------------------------------
 > -- Compiling
@@ -538,6 +579,4 @@ alone.
 >
 > runCTerm :: CTerm a -> a
 > runCTerm (CConst a) = a
->   -- Above might not be sufficient if we can actually have functions in our language.
->   -- Can only use runCTerm at a non-function type.
->
+> runCTerm (CFun f) = runCTerm . f . CConst
