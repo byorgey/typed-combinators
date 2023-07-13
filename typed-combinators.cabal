@@ -24,5 +24,9 @@ common warnings
 library
     import:           warnings
     exposed-modules:  TypedCombinators
-    build-depends:    base ^>=4.18.0.0, text
+    build-depends:    base ^>=4.18.0.0,
+                      text ^>= 2.0,
+                      parser-combinators ^>= 1.3,
+                      megaparsec ^>= 9.4,
+                      witch ^>= 1.2
     default-language: Haskell2010
