@@ -1,40 +1,61 @@
 ---
 title: "Compiling to Intrinsically Typed Combinators"
 bibliography: references.bib
+citation-style: harvard-cite-them-right
 ---
 
     [BLOpts]
     profile = wp
     postid = 2577
+    publish = true
     tags = typed, indexed, combinators, compile, DSL, Haskell, bracket abstraction
     categories = Haskell
 
-**tl;dr**: *I show how to compile via combinators while keeping the
-entire process type-indexed.*  XXX edit
+**tl;dr**: *How to compile a functional language via combinators (and
+evaluate via the Haskell runtime) while keeping the entire process
+type-indexed, with a bibliography and lots of references for further reading*
 
-There is a long history, starting with Schönfinkel and Curry, of XXX
-
-see also [@diller1988compiling] and 
-
-evaluation goes back to XXX Naylor Evaluating Haskell in Haskell, XXX
-
-XXX goal: compile to host language.  Link to related things.
-
-[@gratzer2015bracket]
-
-https://jozefg.bitbucket.io/posts/2015-05-01-brackets.html
-https://crypto.stanford.edu/~blynn/lambda/sk.html
+There is a long history, starting with Schönfinkel and Curry, of
+abstracting away variable names from lambda calculus terms by
+converting to combinators, aka *bracket abstraction*.  This was
+popular in the 80's as a compilation technique for functional
+languages [@turner1979new; @augustsson1986small;
+@spj1987implementation; @diller1988compiling], then apparently
+abandoned. More recently, however, it has been making a bit of a
+comeback.  For example, see
+[Naylor](https://citeseerx.ist.psu.edu/document?repid=rep1&type=pdf&doi=f801c21b2630df3094c9c800c18ebc1e969865da)
+[-@naylor2008evaluating],
+[Gratzer](https://jozefg.bitbucket.io/posts/2015-05-01-brackets.html)
+[-@gratzer2015bracket],
+[Lynn](https://crypto.stanford.edu/~blynn/lambda/sk.html)
+[-@lynncompiler], and
+[Mahler](https://thma.github.io/posts/2021-04-04-Lambda-Calculus-Combinatory-Logic-and-Cartesian-Closed-Categories.html)
+[-@mahler2021ccc].  Bracket abstraction is intimately related to
+compiling to cartesian closed categories [@elliott2017compiling;
+@mahler2021ccc], and also enables cool tricks like doing evaluation
+via the Haskell runtime system [@naylor2008evaluating;
+@seo2016interpreter; @mahler2022evaluating].
 
 However, it always bothered me that the conversion to combinators was
-completely untyped.  Partly to gain some assurance that we are doing
-things correctly, but mostly for fun, I wondered if it would be
-possible to do the whole pipeline in an explicitly type-indexed way.
-For a while I was hung up on how to do type-indexed bracket
-abstraction, and no wonder, since it turns out to be rather subtle.
-However, I eventually found [a nice paper by Oleg Kiselyov](XXX)
-[@kiselyov2018lambda] which explains exactly how to do it (it even
-came with OCaml code that I was easily able to port to Haskell!).
-This blog post is the result.
+invariably described in an untyped way.  Partly to gain some assurance
+that we are doing things correctly, but mostly for fun, I wondered if
+it would be possible to do the whole pipeline in an explicitly
+type-indexed way.  I eventually found [a nice paper by Oleg
+Kiselyov](http://okmij.org/ftp/tagless-final/ski.pdf)
+[-@kiselyov2018lambda] which explains exactly how to do it (it even
+came with [OCaml code](http://okmij.org/ftp/tagless-final/skconv.ml)
+that I was easily able to port to Haskell!).
+
+In this blog post, I:
+
+- Show an example of typechecking and elaboration for a functional
+  language into explicitly type-indexed terms, such that it is
+  impossible to write down ill-typed terms
+- Demonstrate a Haskell port of Oleg Kiselyov's typed
+  bracket abstraction algorithm
+- Demonstrate type-indexed evaluation of terms via the Haskell runtime
+- Put together an extensive bibliography with references for further
+  reading
 
 This blog post is rendered automatically from a literate Haskell file;
 you can [find the complete working source code and blog post on
@@ -84,11 +105,12 @@ Raw terms and types
 -------------------
 
 Here's an algebraic data type to represent raw terms of our DSL,
-something which might come directly out of a parser.  I've put in just
-enough features to make it nontrivial, but there's not much: we have
-integer literals, variables, lambdas, application, `let` and
-`if` expressions, addition, and comparison with `>`.  Of course, it
-would be easy to add more base types and constants.
+something which might come directly out of a parser.  The exact
+language we use here isn't all that important; I've put in just enough
+features to make it nontrivial, but not much beyond that.  We have
+integer literals, variables, lambdas, application, `let` and `if`
+expressions, addition, and comparison with `>`.  Of course, it would
+be easy to add more types, constants, and language features.
 
 > data Term where
 >   Lit :: Int -> Term
@@ -157,10 +179,10 @@ we'll be using as a compilation target---more on these later.
 >   CAdd :: Const (Int -> Int -> Int)
 >   CGt :: Ord α => Const (α -> α -> Bool)
 >   I :: Const (α -> α)
->   K :: Const (α -> b -> α)
->   S :: Const ((α -> b -> c) -> (α -> b) -> α -> c)
->   B :: Const ((     b -> c) -> (α -> b) -> α -> c)
->   C :: Const ((α -> b -> c) ->       b  -> α -> c)
+>   K :: Const (α -> β -> α)
+>   S :: Const ((α -> β -> γ) -> (α -> β) -> α -> γ)
+>   B :: Const ((     β -> γ) -> (α -> β) -> α -> γ)
+>   C :: Const ((α -> β -> γ) ->       β  -> α -> γ)
 >
 > deriving instance Show (Const α)
 
@@ -266,20 +288,20 @@ phases.)
 
 Now for some type-indexed types!
 
-> data TType :: Type -> Type where
->   TTyInt :: TType Int
->   TTyBool :: TType Bool
->   (:->:) :: TType α -> TType β -> TType (α -> β)
+> data TTy :: Type -> Type where
+>   TTyInt :: TTy Int
+>   TTyBool :: TTy Bool
+>   (:->:) :: TTy α -> TTy β -> TTy (α -> β)
 >
-> deriving instance Show (TType ty)
+> deriving instance Show (TTy ty)
 
-`TType` is a term-level representation of our DSL's types, indexed by
-corresponding host language types. In other words, `TType` is a
+`TTy` is a term-level representation of our DSL's types, indexed by
+corresponding host language types. In other words, `TTy` is a
 *singleton*: for a given type `α` there is a single value of type
-`TType α`.  Put another way, pattern-matching on a value of type
-`TType α` lets us learn what the type `α` is.  (See
-[@le2017singletons] for a nice introduction to the idea of singleton
-types.)
+`TTy α`.  Put another way, pattern-matching on a value of type
+`TTy α` lets us learn what the type `α` is.  (See
+[@le2017singletons] for a [nice introduction to the idea of singleton
+types](https://blog.jle.im/entry/introduction-to-singletons-1.html).)
 
 We will need to be able to test two value-level type representations
 for equality and have that reflected at the level of type indices; the
@@ -287,8 +309,8 @@ for equality and have that reflected at the level of type indices; the
 The `testEquality` function takes two type-indexed things and returns
 a type equality proof wrapped in `Maybe`.
 
-> instance TestEquality TType where
->   testEquality :: TType α -> TType β -> Maybe (α :~: β)
+> instance TestEquality TTy where
+>   testEquality :: TTy α -> TTy β -> Maybe (α :~: β)
 >   testEquality TTyInt TTyInt = Just Refl
 >   testEquality TTyBool TTyBool = Just Refl
 >   testEquality (α₁ :->: β₁) (α₂ :->: β₂) =
@@ -298,57 +320,57 @@ a type equality proof wrapped in `Maybe`.
 >   testEquality _ _ = Nothing
 
 Recall that the `CGt` constant requires an `Ord` instance; the
-`checkOrd` function pattern-matches on a `TType` and witnesses the
+`checkOrd` function pattern-matches on a `TTy` and witnesses the
 fact that the corresponding host-language type has an `Ord` instance
 (if, in fact, it does).
 
-> checkOrd :: TType α -> (Ord α => r) -> Maybe r
+> checkOrd :: TTy α -> (Ord α => r) -> Maybe r
 > checkOrd TTyInt r = Just r
 > checkOrd TTyBool r = Just r
 > checkOrd _ _ = Nothing
 
-As a quick aside, I am going to use `Maybe` throughout the rest of
-this post to indicate possible failure.  In a real implementation, one
-would of course want to return more information about the error, but
-that would only distract from the main point of this post.
+As a quick aside, for simplicity's sake, I am going to use `Maybe`
+throughout the rest of this post to indicate possible failure.  In a
+real implementation, one would of course want to return more
+information about any error(s) that occur.
 
 Existential wrappers
 --------------------
 
 Sometimes we will need to wrap type-indexed things inside an
 existential wrapper to hide the type index.  For example, when
-converting from a `Ty` to a `TType`, or when running type inference,
+converting from a `Ty` to a `TTy`, or when running type inference,
 we can't know in advance which type we're going to get.  So we create
 the `Some` data type which wraps up a type-indexed thing along with a
-corresponding `TType`.  Pattern-matching on the singleton `TType` will
+corresponding `TTy`.  Pattern-matching on the singleton `TTy` will
 allow us to recover the type information later.
 
 > data Some :: (Type -> Type) -> Type where
->   Some :: TType α -> t α -> Some t
+>   Some :: TTy α -> t α -> Some t
 >
 > mapSome :: (∀ α. s α -> t α) -> Some s -> Some t
 > mapSome f (Some α t) = Some α (f t)
 
 The first instantiation we'll create is an existentially wrapped type,
-where the `TType` itself is the only thing we care about, and the
+where the `TTy` itself is the only thing we care about, and the
 corresponding `t` will just be the constant unit type functor.  It
 would be annoying to keep writing `F.Const ()` everywhere so we create
 some type and pattern synonyms for convenience.
 
-> type SomeType = Some (F.Const ())
+> type SomeTy = Some (F.Const ())
 >
-> pattern SomeType :: TType α -> SomeType
-> pattern SomeType α = Some α (F.Const ())
-> {-# COMPLETE SomeType #-}
+> pattern SomeTy :: TTy α -> SomeTy
+> pattern SomeTy α = Some α (F.Const ())
+> {-# COMPLETE SomeTy #-}
 
 The `someType` function converts from a raw `Ty` to a type-indexed
-`TType`, wrapped up in an existential wrapper.
+`TTy`, wrapped up in an existential wrapper.
 
-> someType :: Ty -> SomeType
-> someType TyInt = SomeType TTyInt
-> someType TyBool = SomeType TTyBool
+> someType :: Ty -> SomeTy
+> someType TyInt = SomeTy TTyInt
+> someType TyBool = SomeTy TTyBool
 > someType (TyFun a b) = case (someType a, someType b) of
->   (SomeType α, SomeType β) -> SomeType (α :->: β)
+>   (SomeTy α, SomeTy β) -> SomeTy (α :->: β)
 
 Type inference and elaboration
 ------------------------------
@@ -357,7 +379,11 @@ Now that we have our type-indexed core language all set, it's time to
 do type inference, that is, translate from untyped terms to
 type-indexed ones!  First, let's define type contexts, *i.e.* mappings
 from variables to their types.  We store contexts simply as a (fancy,
-type-indexed) list of variable names paired with their types.
+type-indexed) list of variable names paired with their types.  This is
+inefficient---it takes linear time to do a lookup---but we don't
+care, because this is an intermediate representation used only during
+typechecking. By the time we actually get around to running terms,
+variables won't even exist any more.
 
 > data Ctx :: [Type] -> Type where
 >
@@ -366,7 +392,7 @@ type-indexed) list of variable names paired with their types.
 >
 >   -- A cons stores a variable name and its type,
 >   -- and then the rest of the context.
->   (:::) :: (Text, TType α) -> Ctx γ -> Ctx (α ': γ)
+>   (:::) :: (Text, TTy α) -> Ctx γ -> Ctx (α ': γ)
 
 Now we can define the `lookup` function, which takes a variable name
 and a context and tries to return a corresponding de Bruijn index into
@@ -405,7 +431,7 @@ the `Some` returned from `lookup` (revealing the existentially
 quantified type inside) since we immediately wrap it back up in
 another `Some` when returning the `TVar`.
 
->   Var x -> (\(Some α i) -> Some α (TVar i)) <$> lookup x ctx
+>   Var x -> mapSome TVar <$> lookup x ctx
 
 To infer the type of a lambda, we convert the argument type annotation
 to a type-indexed type, infer the type of the body under an extended
@@ -499,7 +525,7 @@ cases here for terms which can be checked but not inferred.)  Notice
 how this also allows us to return the type-indexed term without using
 an existential wrapper, since the expected type is an input.
 
-> check :: Ctx γ -> TType α -> Term -> Maybe (TTerm γ α)
+> check :: Ctx γ -> TTy α -> Term -> Maybe (TTerm γ α)
 > check ctx α t = do
 >   Some β t' <- infer ctx t
 >   case testEquality α β of
@@ -579,8 +605,10 @@ Turing-complete: for example, [SKI is the most well-known complete
 set](https://en.wikipedia.org/wiki/SKI_combinator_calculus) (or just
 SK if you're trying to be minimal).  There are well-known algorithms
 for compiling lambda calculus terms into combinators, known generally
-as *bracket
-abstraction* XXX references.
+as *bracket abstraction* (for further reading about bracket
+abstraction in general, see
+[Diller](https://www.cantab.net/users/antoni.diller/brackets/intro.html)
+[-@diller2014bracket]; for some in-depth history along with illustrative Haskell code, see [Ben Lynn's page on Combinatory Logic](https://crypto.stanford.edu/~blynn/lambda/cl.html) [-@lynncl]; for nice example implementations in Haskell, see blog posts by [Gratzer](gratzer2015bracket) [-@gratzer2015bracket], [Seo](http://kseo.github.io/posts/2016-12-30-write-you-an-interpreter.html) [-@seo2016interpreter], and [Mahler](https://thma.github.io/posts/2021-12-27-Implementing-a-functional-language-with-Graph-Reduction.html) [-@mahler2021graph].)
 
 So the idea is to compile our typed core language down to combinators.
 The resulting terms will have *no* lambdas or variables---only
@@ -623,27 +651,21 @@ need access to a shared parameter `z`; `B` and `C` are similar, but
 `B` is used when only `y`, and not `x`, needs access to `z`, and `C`
 is for when only `x` needs access to `z`.  Using `B` and `C` will
 allow for more efficient encodings than would be possible with `S`
-alone.
+alone. If you want to compile a language with recursion you can also
+easily add the usual `Y` combinator ("`SICKBY`"), although the example
+language in this post has no recursion so we won't use it.
 
-If you want to compile a language with recursion you can also add the
-usual `Y` combinator ("`SICKBY`"), although the example language in
-this post has no recursion so we won't use it.
-
-[@kiselyov2018lambda]
-
-Bracket abstraction is usually presented in an untyped way (for
-example,  XXX references
-[here](https://jozefg.bitbucket.io/posts/2015-05-01-brackets.html),
-[here](http://kseo.github.io/posts/2016-12-30-write-you-an-interpreter.html),
-and
-[here](https://thma.github.io/posts/2021-12-27-Implementing-a-functional-language-with-Graph-Reduction.html)).
-But I found this [really cool paper by Oleg
-Kiselyov](http://okmij.org/ftp/tagless-final/ski.pdf) where he shows
-how to do bracket abstraction in a completely compositional,
-type-indexed way.  I found the paper a bit hard to understand, but
-fortunately it came with [working OCaml
+Bracket abstraction is often presented in an untyped way, but I found
+this [really cool paper by Oleg
+Kiselyov](http://okmij.org/ftp/tagless-final/ski.pdf)
+[-@kiselyov2018lambda] where he shows how to do bracket abstraction in
+a completely compositional, type-indexed way.  I found the paper a bit
+hard to understand, but fortunately it came with [working OCaml
 code](http://okmij.org/ftp/tagless-final/skconv.ml)!  Translating it
-to Haskell was straightforward.
+to Haskell was straightforward.  Much later, after writing most of
+this blog post, I found a [a nice explanation of Kiselyov's
+paper](https://crypto.stanford.edu/~blynn/lambda/kiselyov.html) by
+@lynnkiselyov which helped me make more sense of the paper.
 
 First, a data type for open terms, which represent an intermediate
 stage in the bracket abstraction algorithm, where some parts have been
@@ -651,7 +673,7 @@ converted to closed combinator terms (the `E` constructor embeds
 `BTerm` values), and some parts still have not.  This corresponds to
 Kiselyov's eta-optimized version (section 4.1 of the paper).  A
 simplified version that does not include `V` is possible, but results
-in longer resulting combinator expressions.
+in longer combinator expressions.
 
 > data OTerm :: [Type] -> Type -> Type where
 >
@@ -730,7 +752,7 @@ The final bracket abstraction algorithm consists of calling `conv` on
 a closed `TTerm`---this must result in a term of type `OTerm '[] α`,
 and the only constructor which could possibly produce such a type is
 `E`, containing an embedded `BTerm`.  So we can just extract that
-`BTerm`, and GHC can see that this is total as well.
+`BTerm`, and GHC can see that this is total.
 
 > bracket :: TTerm '[] α -> BTerm α
 > bracket t = case conv t of { E t' -> t' }
@@ -744,18 +766,19 @@ C C 1 (C C (C C 1 plus) (B S (C C I (B S (B (B if) (B (B (gt 7)) (C I (C C 3 plu
 2
 ```
 
-Cool.  This is not too much longer than the original term, which is
-the point of using the optimized version.  Interestingly it does not
+Neat!  This is not too much longer than the original term, which is
+the point of using the optimized version.  Interestingly, this example happens to not
 use `K` at all, but a more complex term certainly would.
 
 Kiselyov also presents an even better algorithm using $n$-ary
 combinators which uses guaranteed linear time and space.  For
 simplicity, he presents it in an untyped way and claims in passing
 that it "can be backported to the typed case", though I am not aware
-of anyone who has actually done this.  @lynnkiselyov has [a nice
-explanation of Kiselyov's
+of anyone who has actually done this yet (perhaps I will, later).
+@lynnkiselyov has [a nice explanation of Kiselyov's
 paper](https://crypto.stanford.edu/~blynn/lambda/kiselyov.html),
-including a section that expands on XXX
+including a section that explores several alternatives to Kiselyov's
+linear-time algorithm.
 
 Compiling type-indexed combinators to Haskell
 ---------------------------------------------
@@ -763,9 +786,16 @@ Compiling type-indexed combinators to Haskell
 So at this point we can take a `Term`, typecheck it to produce a
 `TTerm`, then use bracket abstraction to convert that to a `BTerm`.
 We have an interpreter for `BTerm`s, but we're instead going to do one
-more compilation step, to XXX
-
-XXX well-explained in XXX blog posts
+more compilation step, to turn `BTerm`s directly into native Haskell
+values.  This idea originates with @naylor2008evaluating and is
+well-explained in blog posts by
+[Seo](http://kseo.github.io/posts/2016-12-30-write-you-an-interpreter.html)
+[-@seo2016interpreter] and
+[Mahler](https://thma.github.io/posts/2022-02-05-Evaluating-SKI-combinators-as-native-Haskell-functions.html)
+[-@mahler2022evaluating].  This still feels a little like black magic
+to me, and I am actually unclear on whether it is really faster than
+calling `interpBTerm`; some benchmarking would be needed.  In any case
+I include it here for completeness.
 
 Our target for this final compilation step is the following `CTerm`
 type, which has only functions, represented by `CFun`, and constants.
@@ -776,7 +806,7 @@ this.
 
 > data CTerm α where
 >   CFun :: (CTerm α -> CTerm β) -> CTerm (α -> β)
->   CConst :: α -> CTerm α
+>   CConst :: α -> CTerm α -- CConst invariant: α is not a function type
 >
 > instance Applicable CTerm where
 >   CFun f $$ x = f x
@@ -798,7 +828,7 @@ this.
 >   B        -> CFun $ \f -> CFun $ \g -> CFun $ \x -> f $$ (g $$ x)
 >   C        -> CFun $ \f -> CFun $ \x -> CFun $ \y -> f $$ y $$ x
 >
-> binary :: (α -> b -> c) -> CTerm (α -> b -> c)
+> binary :: (α -> β -> γ) -> CTerm (α -> β -> γ)
 > binary op = CFun $ \(CConst x) -> CFun $ \(CConst y) -> CConst (op x y)
 
 Finally, we can "run" a `CTerm α` to extract a value of type `α`.
